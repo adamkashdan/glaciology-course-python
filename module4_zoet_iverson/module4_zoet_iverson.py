@@ -344,8 +344,143 @@ def plot_stick_slip_tidal_modulation():
 
 
 # =============================================================================
-# ТОЧКА ВХОДА
+# 4. МЁРЗЛАЯ КАЙМА (FROZEN FRINGE)
 # =============================================================================
+#
+# Мёрзлая кайма — переходный слой на границе лёд-ложе, в котором лёд
+# проникает в поры подстилающих отложений. Её механическая прочность
+# определяется взаимодействием насыщения льдом (S) и порового давления
+# воды (см. Rempel, 2008; Meyer & Minchew, 2018; Hansen et al., 2024,
+# "Presence of Frozen Fringe Impacts Soft-Bedded Slip Relationship",
+# Geophysical Research Letters):
+#
+#   1. ЗАКУПОРКА: рост насыщения льдом S снижает проницаемость осадка
+#      (лёд забивает поровые каналы) -> вода не успевает оттекать при
+#      нагружении -> избыточное поровое давление растёт с S.
+#   2. ОСЛАБЛЕНИЕ: по механике грунтов прочность определяется эффективным
+#      напряжением N_eff = N_far - ΔP(S) (вес льда минус давление воды).
+#      Рост ΔP(S) снижает N_eff -> кайма механически СЛАБЕЕ, чем
+#      свободный от льда till ниже неё, особенно на малых скоростях.
+#   3. ЗАВИСИМОСТЬ ОТ S: сопротивление кулоновскому+скоростному закону
+#      определяется тем же регуляризованным законом Кулона, но с N_eff(S)
+#      вместо "дальнего" эффективного давления N_far. Rate-strengthening
+#      сохраняется вплоть до нового (сниженного) кулоновского предела
+#      C*N_eff(S).
+#
+# Ниже — упрощённая иллюстративная параметризация этих трёх эффектов
+# (не дословные уравнения из статьи, а педагогическая модель, качественно
+# воспроизводящая описанное поведение).
+
+
+def pore_pressure_excess(S, dP_max, p=3.0):
+    """
+    Избыточное поровое давление в кайме за счёт "закупорки" (choking)
+    поровых каналов льдом.
+
+        ΔP(S) = dP_max * S^p
+
+    При S -> 0 (поры свободны ото льда) ΔP -> 0 (давление как в глубоком
+    till). При S -> 1 (поры полностью заполнены льдом) ΔP -> dP_max —
+    вода почти не может оттекать, давление приближается к весу
+    вышележащего льда.
+
+    Параметры
+    ----------
+    S : float или np.ndarray
+        Степень насыщения льдом порового пространства, [0, 1]
+    dP_max : float
+        Максимальное избыточное поровое давление при S=1, Па
+    p : float
+        Показатель нелинейности "закупорки" (p>1: давление растёт
+        медленно при малых S и резко ускоряется при приближении к
+        полному насыщению — качественно как в Kozeny-Carman-подобных
+        моделях проницаемости)
+    """
+    S = np.clip(np.asarray(S, dtype=float), 0.0, 1.0)
+    return dP_max * S ** p
+
+
+def fringe_effective_pressure(S, N_far, dP_max, p=3.0, N_min_frac=0.02):
+    """
+    Эффективное давление внутри мёрзлой каймы как функция насыщения льдом.
+
+        N_eff(S) = N_far - ΔP(S)
+
+    N_min_frac задаёт нижнюю границу (малую долю от N_far), чтобы
+    избежать нефизичного N_eff <= 0 при экстремальном насыщении.
+    """
+    dP = pore_pressure_excess(S, dP_max, p)
+    return np.maximum(N_far - dP, N_min_frac * N_far)
+
+
+def fringe_slip_stress(u_s, S, N_far, C=0.5, u_t=50.0 / SEC_PER_YEAR, n=3.0,
+                        dP_max=None, p=3.0):
+    """
+    Базальное напряжение мёрзлой каймы: регуляризованный закон Кулона
+    (та же функциональная форма, что и zoet_iverson_stress), но с
+    эффективным давлением, ослабленным насыщением льдом.
+
+    Если dP_max не задан, используется 0.9*N_far (при полном насыщении
+    почти весь вес льда несёт вода, N_eff падает до N_min_frac*N_far).
+    """
+    if dP_max is None:
+        dP_max = 0.9 * N_far
+    N_eff = fringe_effective_pressure(S, N_far, dP_max, p)
+    return zoet_iverson_stress(u_s, N_eff, C=C, u_t=u_t, n=n), N_eff
+
+
+def plot_frozen_fringe():
+    """
+    Сравнивает кривые скольжения (drag vs скорость) для нескольких
+    уровней насыщения льдом S и для "дальнего" (свободного ото льда)
+    till как эталона. Показывает: (а) при любом S сохраняется
+    rate-strengthening до кулоновского предела; (б) с ростом S предел
+    и вся кривая опускаются ниже эталонной кривой till — кайма слабее,
+    особенно заметно на малых скоростях.
+    """
+    u_s = np.logspace(-1, 4, 400) / SEC_PER_YEAR
+    N_far = 5e5  # эффективное давление в глубоком till, Па
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+
+    # --- Панель 1: кривые скольжения для разных S ---
+    tau_till, _ = fringe_slip_stress(u_s, S=0.0, N_far=N_far)  # эталон: S=0 <=> till
+    axes[0].semilogx(u_s * SEC_PER_YEAR, tau_till / 1e3, lw=2.5, color="black",
+                      ls="--", label="Свободный ото льда till (эталон)")
+
+    colors = plt.cm.plasma(np.linspace(0.15, 0.85, 4))
+    for S_val, color in zip([0.3, 0.6, 0.85, 0.97], colors):
+        tau_fringe, N_eff = fringe_slip_stress(u_s, S=S_val, N_far=N_far)
+        axes[0].semilogx(u_s * SEC_PER_YEAR, tau_fringe / 1e3, lw=2, color=color,
+                          label=f"Мёрзлая кайма, S = {S_val:.2f} (N_eff = {N_eff/1e3:.0f} кПа)")
+
+    axes[0].set_xlabel("Скорость скольжения u_s, м/год")
+    axes[0].set_ylabel("Базальное напряжение τ, кПа")
+    axes[0].set_title("Ослабление сопротивления с ростом насыщения льдом S")
+    axes[0].legend(fontsize=8)
+    axes[0].grid(alpha=0.3, which="both")
+
+    # --- Панель 2: N_eff(S) и избыточное поровое давление ---
+    S_range = np.linspace(0, 1, 200)
+    N_eff_range = fringe_effective_pressure(S_range, N_far, dP_max=0.9 * N_far)
+    dP_range = pore_pressure_excess(S_range, dP_max=0.9 * N_far)
+
+    axes[1].plot(S_range, N_eff_range / 1e3, lw=2, color="#1f77b4", label="N_eff(S) — эффективное давление")
+    axes[1].plot(S_range, dP_range / 1e3, lw=2, color="#d62728", ls="--", label="ΔP(S) — избыточное поровое давление")
+    axes[1].set_xlabel("Насыщение льдом S")
+    axes[1].set_ylabel("Давление, кПа")
+    axes[1].set_title("Закупорка пор льдом снижает эффективное давление")
+    axes[1].legend(fontsize=9)
+    axes[1].grid(alpha=0.3)
+
+    fig.suptitle("Мёрзлая кайма: связь насыщения льдом, порового давления и прочности ложа "
+                  "(ср. Hansen et al., 2024, GRL)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig("/mnt/user-data/outputs/frozen_fringe.png", dpi=150)
+    plt.close(fig)
+
+    print(f"   При S=0.97: N_eff = {fringe_effective_pressure(0.97, N_far, 0.9*N_far):.0f} Па "
+          f"({fringe_effective_pressure(0.97, N_far, 0.9*N_far)/N_far*100:.1f}% от N_far={N_far:.0e} Па)")
 
 if __name__ == "__main__":
     print("Модуль 4: Механика скольжения и закон Зоэта-Иверсона")
@@ -368,5 +503,8 @@ if __name__ == "__main__":
     result_tidal = plot_stick_slip_tidal_modulation()
     print(f"   Скорость скольжения: {result_tidal['u_s_myr'].min():.2f} - "
           f"{result_tidal['u_s_myr'].max():.0f} м/год (импульсные события на минимумах N)")
+
+    print("5. Мёрзлая кайма: ослабление сопротивления при насыщении льдом S...")
+    plot_frozen_fringe()
 
     print("\nГотово. Графики сохранены в /mnt/user-data/outputs/")
